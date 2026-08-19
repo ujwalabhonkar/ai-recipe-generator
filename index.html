@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cognito + Bedrock AI Recipe Generator</title>
+  <!-- Amazon Cognito Identity SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@6.3.12/dist/amazon-cognito-identity.min.js"></script>
+  <style>
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      max-width: 550px; 
+      margin: 40px auto; 
+      padding: 24px; 
+      border: 1px solid #e0e0e0; 
+      border-radius: 12px; 
+      box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+      background-color: #fafafa;
+    }
+    h2, h3 { color: #232f3e; margin-top: 0; }
+    input, select, textarea, button { 
+      width: 100%; 
+      padding: 12px; 
+      margin: 8px 0; 
+      box-sizing: border-box; 
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    textarea { resize: vertical; min-height: 80px; }
+    button { 
+      background: #ff9900; 
+      color: #111; 
+      border: none; 
+      font-weight: bold; 
+      cursor: pointer; 
+      transition: background 0.2s;
+    }
+    button:hover { background: #e68a00; }
+    .toggle-btn {
+      background: transparent;
+      color: #0066cc;
+      text-decoration: underline;
+      font-weight: normal;
+      font-size: 0.9em;
+      margin-top: 10px;
+    }
+    .toggle-btn:hover { background: transparent; color: #004080; }
+    .recipe-output { 
+      background: #ffffff; 
+      padding: 16px; 
+      border-radius: 8px; 
+      border: 1px solid #ddd;
+      white-space: pre-wrap; 
+      word-break: break-word;
+      font-family: inherit;
+      line-height: 1.5;
+      margin-top: 12px;
+    }
+    .status-badge {
+      font-size: 0.85em;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #e1f5fe;
+      color: #0288d1;
+      display: inline-block;
+      margin-bottom: 12px;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+  <h2>🍳 AI Recipe Generator</h2>
+  <span class="status-badge">Powered by AWS Cognito + API Gateway + Bedrock (Claude)</span>
+
+  <!-- 1. SIGN IN FORM -->
+  <div id="login-section">
+    <h3>Sign In</h3>
+    <input type="text" id="login-username" placeholder="Username or Email" />
+    <input type="password" id="login-password" placeholder="Password" />
+    <button onclick="login()">Log In</button>
+    <button class="toggle-btn" onclick="showSection('signup-section')">Need an account? Sign Up</button>
+  </div>
+
+  <!-- 2. SIGN UP FORM -->
+  <div id="signup-section" class="hidden">
+    <h3>Sign Up</h3>
+    <input type="text" id="signup-username" placeholder="Choose Username" />
+    <input type="email" id="signup-email" placeholder="Email Address" />
+    <input type="password" id="signup-password" placeholder="Password" />
+    <button onclick="signUp()">Register</button>
+    <button class="toggle-btn" onclick="showSection('login-section')">Already have an account? Sign In</button>
+  </div>
+
+  <!-- 3. VERIFICATION CODE FORM -->
+  <div id="verify-section" class="hidden">
+    <h3>Verify Email</h3>
+    <p style="font-size: 0.9em; color: #555;">Check your inbox for a verification code from Cognito.</p>
+    <input type="text" id="verify-username" placeholder="Username" readonly />
+    <input type="text" id="verify-code" placeholder="Verification Code" />
+    <button onclick="verifyCode()">Confirm Account</button>
+  </div>
+
+  <!-- 4. APP SECTION (AI RECIPE GENERATOR) -->
+  <div id="app-section" class="hidden">
+    <h3>Generate Your Recipe</h3>
+    
+    <label for="ingredients-input"><strong>Available Ingredients:</strong></label>
+    <textarea id="ingredients-input" placeholder="e.g., Chicken breast, tomatoes, garlic, olive oil, basil"></textarea>
+
+    <label for="cuisine-select"><strong>Cuisine Style:</strong></label>
+    <select id="cuisine-select">
+      <option value="Any">Any Style</option>
+      <option value="Italian">Italian</option>
+      <option value="Indian">Indian</option>
+      <option value="Mexican">Mexican</option>
+      <option value="Asian">Asian</option>
+      <option value="Mediterranean">Mediterranean</option>
+    </select>
+
+    <button id="generate-btn" onclick="generateRecipe()">✨ Generate Recipe with Bedrock</button>
+    <button onclick="logout()" style="background: #dc3545; color: white;">Log Out</button>
+
+    <h4>AI Chef Response:</h4>
+    <div id="api-result" class="recipe-output">Enter your ingredients and click 'Generate Recipe'.</div>
+  </div>
+
+  <script>
+    // --- AWS CONFIGURATION ---
+    const CONFIG = {
+      UserPoolId: 'us-east-1_jVmeFK9hE', 
+      ClientId: '79i45bkfo2nbo3tf8hv1d46gq5',        
+      ApiUrl: 'https://omqd1h96s6.execute-api.us-east-1.amazonaws.com/dev/recipe' // Point this to your API Gateway POST route
+    };
+
+    const userPool = new AmazonCognitoIdentity.CognitoUserPool({
+      UserPoolId: CONFIG.UserPoolId,
+      ClientId: CONFIG.ClientId
+    });
+
+    let currentIdToken = null;
+
+    // --- UI NAVIGATION HELPER ---
+    function showSection(sectionId) {
+      ['login-section', 'signup-section', 'verify-section', 'app-section'].forEach(id => {
+        document.getElementById(id).classList.add('hidden');
+      });
+      document.getElementById(sectionId).classList.remove('hidden');
+    }
+
+    // --- 1. SIGN UP ---
+    function signUp() {
+      const username = document.getElementById('signup-username').value;
+      const email = document.getElementById('signup-email').value;
+      const password = document.getElementById('signup-password').value;
+
+      if (!username || !email || !password) {
+        alert("Please fill in all fields.");
+        return;
+      }
+
+      const attributeList = [
+        new AmazonCognitoIdentity.CognitoUserAttribute({ Name: 'email', Value: email })
+      ];
+
+      userPool.signUp(username, password, attributeList, null, (err, result) => {
+        if (err) {
+          alert('Sign up failed: ' + (err.message || JSON.stringify(err)));
+          return;
+        }
+        alert('Sign up successful! Please check your email for the verification code.');
+        document.getElementById('verify-username').value = username;
+        showSection('verify-section');
+      });
+    }
+
+    // --- 2. VERIFY CODE ---
+    function verifyCode() {
+      const username = document.getElementById('verify-username').value;
+      const code = document.getElementById('verify-code').value;
+
+      const cognitoUser = new AmazonCognitoIdentity.CognitoUser({ Username: username, Pool: userPool });
+
+      cognitoUser.confirmRegistration(code, true, (err, result) => {
+        if (err) {
+          alert('Verification failed: ' + (err.message || JSON.stringify(err)));
+          return;
+        }
+        alert('Account verified successfully! You can now log in.');
+        showSection('login-section');
+      });
+    }
+
+    // --- 3. LOG IN ---
+    function login() {
+      const username = document.getElementById('login-username').value;
+      const password = document.getElementById('login-password').value;
+
+      if (!username || !password) {
+        alert("Please enter both username and password.");
+        return;
+      }
+
+      const authenticationDetails = new AmazonCognitoIdentity.AuthenticationDetails({ Username: username, Password: password });
+      const cognitoUser = new AmazonCognitoIdentity.CognitoUser({ Username: username, Pool: userPool });
+
+      cognitoUser.authenticateUser(authenticationDetails, {
+        onSuccess: (result) => {
+          handleSuccess(result);
+        },
+        onFailure: (err) => {
+          alert('Login failed: ' + (err.message || JSON.stringify(err)));
+        },
+        newPasswordRequired: (userAttributes) => {
+          const newPassword = prompt("First-time login detected! Enter a new password:");
+          if (!newPassword) return;
+          delete userAttributes.email_verified;
+          delete userAttributes.phone_number_verified;
+          cognitoUser.completeNewPasswordChallenge(newPassword, userAttributes, {
+            onSuccess: (result) => handleSuccess(result),
+            onFailure: (err) => alert('Password update failed: ' + err.message)
+          });
+        }
+      });
+    }
+
+    function handleSuccess(result) {
+      currentIdToken = result.getIdToken().getJwtToken();
+      showSection('app-section');
+    }
+
+    // --- 4. CALL BEDROCK VIA API GATEWAY ---
+    async function generateRecipe() {
+      const ingredients = document.getElementById('ingredients-input').value;
+      const cuisine = document.getElementById('cuisine-select').value;
+      const resultBox = document.getElementById('api-result');
+      const genBtn = document.getElementById('generate-btn');
+
+      if (!ingredients.trim()) {
+        alert("Please enter some ingredients first!");
+        return;
+      }
+
+      resultBox.innerText = '🤖 Asking Amazon Nova 2 lite on Bedrock to craft your recipe... Please wait...';
+      genBtn.disabled = true;
+
+      try {
+        const response = await fetch(CONFIG.ApiUrl, {
+          method: 'POST',
+          headers: { 
+            'Authorization': currentIdToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            ingredients: ingredients,
+            cuisine: cuisine
+          })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.recipe) {
+          resultBox.innerText = data.recipe;
+        } else {
+          resultBox.innerText = 'Error: ' + (data.error || JSON.stringify(data));
+        }
+      } catch (error) {
+        resultBox.innerText = 'Connection Error: ' + error.message;
+      } finally {
+        genBtn.disabled = false;
+      }
+    }
+
+    // --- 5. LOG OUT ---
+    function logout() {
+      const currentUser = userPool.getCurrentUser();
+      if (currentUser) currentUser.signOut();
+      currentIdToken = null;
+      document.getElementById('api-result').innerText = "Enter your ingredients and click 'Generate Recipe'.";
+      showSection('login-section');
+    }
+  </script>
+</body>
+</html>
